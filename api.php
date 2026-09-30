@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const AUCTION_SECONDS = 25;
+const BID_TURN_SECONDS = 5;
 
 class DuplicateItemsException extends DomainException
 {
@@ -56,8 +56,12 @@ function database(): PDO
         id INTEGER PRIMARY KEY AUTOINCREMENT, room_code TEXT NOT NULL REFERENCES rooms(code) ON DELETE CASCADE,
         owner_id TEXT NOT NULL REFERENCES players(id), name TEXT NOT NULL, minimum_bid INTEGER NOT NULL,
         position INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'draft', current_bid INTEGER NOT NULL DEFAULT 0,
-        buyer_id TEXT REFERENCES players(id), deadline INTEGER
+        buyer_id TEXT REFERENCES players(id), deadline INTEGER, turn_player_id TEXT
     )");
+    $itemColumns = $pdo->query('PRAGMA table_info(items)')->fetchAll();
+    if (!in_array('turn_player_id', array_column($itemColumns, 'name'), true)) {
+        $pdo->exec('ALTER TABLE items ADD COLUMN turn_player_id TEXT');
+    }
     $pdo->exec("CREATE TABLE IF NOT EXISTS bids (
         id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL REFERENCES items(id),
         player_id TEXT NOT NULL REFERENCES players(id), amount INTEGER NOT NULL, created_at INTEGER NOT NULL
@@ -112,22 +116,12 @@ function begin(PDO $pdo): void
     $pdo->exec('BEGIN IMMEDIATE');
 }
 
-function finishExpiredAuction(PDO $pdo, array &$room): void
+function completeCurrentItem(PDO $pdo, array &$room, array $item): void
 {
-    if ($room['phase'] !== 'auction' || !$room['current_item_id']) {
-        return;
-    }
-    $statement = $pdo->prepare("SELECT * FROM items WHERE id = ? AND status = 'active'");
-    $statement->execute([$room['current_item_id']]);
-    $item = $statement->fetch();
-    if (!$item || (int)$item['deadline'] > time()) {
-        return;
-    }
-
     if ($item['buyer_id']) {
         $statement = $pdo->prepare('UPDATE players SET credits = credits - ? WHERE id = ?');
         $statement->execute([$item['current_bid'], $item['buyer_id']]);
-        if ((int)$room['seller_receives_credits'] === 1) {
+        if ((int)$room['seller_receives_credits'] === 1 && $item['owner_id'] !== $item['buyer_id']) {
             $statement = $pdo->prepare('UPDATE players SET credits = credits + ? WHERE id = ?');
             $statement->execute([$item['current_bid'], $item['owner_id']]);
         }
@@ -141,8 +135,11 @@ function finishExpiredAuction(PDO $pdo, array &$room): void
     $statement->execute([$room['code']]);
     $next = $statement->fetchColumn();
     if ($next) {
-        $statement = $pdo->prepare("UPDATE items SET status = 'active', deadline = ? WHERE id = ?");
-        $statement->execute([time() + AUCTION_SECONDS, $next]);
+        $statement = $pdo->prepare('SELECT id FROM players WHERE room_code = ? ORDER BY joined_at, name LIMIT 1');
+        $statement->execute([$room['code']]);
+        $firstPlayer = $statement->fetchColumn();
+        $statement = $pdo->prepare("UPDATE items SET status = 'active', deadline = ?, turn_player_id = ? WHERE id = ?");
+        $statement->execute([time() + BID_TURN_SECONDS, $firstPlayer, $next]);
         $statement = $pdo->prepare('UPDATE rooms SET current_item_id = ? WHERE code = ?');
         $statement->execute([$next, $room['code']]);
         $room['current_item_id'] = $next;
@@ -152,6 +149,41 @@ function finishExpiredAuction(PDO $pdo, array &$room): void
         $room['phase'] = 'finished';
         $room['current_item_id'] = null;
     }
+}
+
+function finishExpiredAuction(PDO $pdo, array &$room): void
+{
+    if ($room['phase'] !== 'auction' || !$room['current_item_id']) {
+        return;
+    }
+    $statement = $pdo->prepare("SELECT * FROM items WHERE id = ? AND status = 'active'");
+    $statement->execute([$room['current_item_id']]);
+    $item = $statement->fetch();
+    if (!$item || (int)$item['deadline'] > time()) {
+        return;
+    }
+
+    $statement = $pdo->prepare('SELECT id FROM players WHERE room_code = ? ORDER BY joined_at, name');
+    $statement->execute([$room['code']]);
+    $playerIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+    if (!$playerIds) {
+        completeCurrentItem($pdo, $room, $item);
+        return;
+    }
+    $currentIndex = array_search($item['turn_player_id'], $playerIds, true);
+    $nextIndex = (($currentIndex === false ? -1 : $currentIndex) + 1) % count($playerIds);
+    $nextPlayerId = $playerIds[$nextIndex];
+    $queueFinished = $item['buyer_id']
+        ? $nextPlayerId === $item['buyer_id']
+        : $nextIndex === 0;
+
+    if ($queueFinished) {
+        completeCurrentItem($pdo, $room, $item);
+        return;
+    }
+
+    $statement = $pdo->prepare('UPDATE items SET turn_player_id = ?, deadline = ? WHERE id = ?');
+    $statement->execute([$nextPlayerId, time() + BID_TURN_SECONDS, $item['id']]);
 }
 
 function state(PDO $pdo, array $data): array
@@ -172,7 +204,7 @@ function state(PDO $pdo, array $data): array
     $statement = $pdo->prepare('SELECT id, name, credits, joined_at FROM players WHERE room_code = ? ORDER BY joined_at, name');
     $statement->execute([$room['code']]);
     $players = $statement->fetchAll();
-    $statement = $pdo->prepare("SELECT i.id, i.name, i.minimum_bid, i.position, i.status, i.current_bid, i.buyer_id, i.deadline,
+    $statement = $pdo->prepare("SELECT i.id, i.name, i.minimum_bid, i.position, i.status, i.current_bid, i.buyer_id, i.deadline, i.turn_player_id,
         owner.name AS owner_name, buyer.name AS buyer_name
         FROM items i JOIN players owner ON owner.id = i.owner_id
         LEFT JOIN players buyer ON buyer.id = i.buyer_id
@@ -370,8 +402,11 @@ try {
                 $statement->execute([$position, $itemId]);
             }
             $firstItem = $itemIds[0];
-            $statement = $pdo->prepare("UPDATE items SET status = 'active', deadline = ? WHERE id = ?");
-            $statement->execute([time() + AUCTION_SECONDS, $firstItem]);
+            $statement = $pdo->prepare('SELECT id FROM players WHERE room_code = ? ORDER BY joined_at, name LIMIT 1');
+            $statement->execute([$room['code']]);
+            $firstPlayer = $statement->fetchColumn();
+            $statement = $pdo->prepare("UPDATE items SET status = 'active', deadline = ?, turn_player_id = ? WHERE id = ?");
+            $statement->execute([time() + BID_TURN_SECONDS, $firstPlayer, $firstItem]);
             $statement = $pdo->prepare("UPDATE rooms SET phase = 'auction', current_item_id = ? WHERE code = ?");
             $statement->execute([$firstItem, $room['code']]);
             $pdo->exec('COMMIT');
@@ -400,6 +435,9 @@ try {
             $statement = $pdo->prepare("SELECT * FROM items WHERE id = ? AND status = 'active'");
             $statement->execute([$room['current_item_id']]);
             $item = $statement->fetch();
+            if ($item['turn_player_id'] !== $player['id']) {
+                throw new DomainException('Ainda não é a sua vez. Aguarde o próximo turno.');
+            }
             $statement = $pdo->prepare('SELECT credits FROM players WHERE id = ?');
             $statement->execute([$player['id']]);
             $credits = (int)$statement->fetchColumn();
@@ -410,8 +448,13 @@ try {
             if ($credits < $amount) {
                 throw new DomainException('Seu saldo não cobre esse lance.');
             }
-            $statement = $pdo->prepare('UPDATE items SET current_bid = ?, buyer_id = ? WHERE id = ?');
-            $statement->execute([$amount, $player['id'], $item['id']]);
+            $statement = $pdo->prepare('SELECT id FROM players WHERE room_code = ? ORDER BY joined_at, name');
+            $statement->execute([$room['code']]);
+            $playerIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+            $playerIndex = array_search($player['id'], $playerIds, true);
+            $nextPlayerId = $playerIds[($playerIndex + 1) % count($playerIds)];
+            $statement = $pdo->prepare('UPDATE items SET current_bid = ?, buyer_id = ?, turn_player_id = ?, deadline = ? WHERE id = ?');
+            $statement->execute([$amount, $player['id'], $nextPlayerId, time() + BID_TURN_SECONDS, $item['id']]);
             $statement = $pdo->prepare('INSERT INTO bids (item_id, player_id, amount, created_at) VALUES (?, ?, ?, ?)');
             $statement->execute([$item['id'], $player['id'], $amount, time()]);
             $pdo->exec('COMMIT');
@@ -440,7 +483,7 @@ try {
             if ($item && $item['buyer_id']) {
                 $statement = $pdo->prepare('UPDATE players SET credits = credits - ? WHERE id = ?');
                 $statement->execute([$item['current_bid'], $item['buyer_id']]);
-                if ((int)$activeRoom['seller_receives_credits'] === 1) {
+                if ((int)$activeRoom['seller_receives_credits'] === 1 && $item['owner_id'] !== $item['buyer_id']) {
                     $statement = $pdo->prepare('UPDATE players SET credits = credits + ? WHERE id = ?');
                     $statement->execute([$item['current_bid'], $item['owner_id']]);
                 }

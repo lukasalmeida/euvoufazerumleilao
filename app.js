@@ -151,16 +151,20 @@ function renderAuction(state) {
   if (!item) return '<section class="content-section"><p>Preparando o próximo item...</p></section>';
   const minimum = Math.max(1, Number(item.current_bid) * (item.buyer_id ? 2 : 1));
   const seconds = Math.max(0, Number(item.deadline) - Math.floor(Date.now() / 1000));
-  const canBid = state.me.credits >= minimum;
+  const currentTurn = state.players.find((player) => player.id === item.turn_player_id);
+  const isMyTurn = item.turn_player_id === state.me.id;
+  const canBid = isMyTurn && state.me.credits >= minimum;
+  const turnLabel = currentTurn?.is_me ? 'Sua vez de dar lance' : `Vez de ${escapeHtml(currentTurn?.name || 'outro jogador')}`;
   return `<div class="auction-layout">
     <section class="auction-lot">
-      <div class="lot-topline"><span class="step-tag">LOTE ${String(item.position + 1).padStart(2, '0')} / ${state.items.length}</span><span class="timer ${seconds <= 8 ? 'timer-urgent' : ''}" data-deadline="${item.deadline}">${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}</span></div>
+      <div class="lot-topline"><span class="step-tag">LOTE ${String(item.position + 1).padStart(2, '0')} / ${state.items.length}</span><span class="timer ${seconds <= 2 ? 'timer-urgent' : ''}" data-deadline="${item.deadline}">${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}</span></div>
       <p class="lot-category">${escapeHtml(state.room.theme)}</p><h2>${escapeHtml(item.name)}</h2><p class="lot-owner">De <strong>${escapeHtml(item.owner_name)}</strong></p>
       <div class="bid-display"><span>${item.buyer_name ? 'LANCE ATUAL' : 'SEM LANCES'}</span><strong>${Number(item.current_bid).toLocaleString('pt-BR')} <small>CR</small></strong><p>${item.buyer_name ? `na frente: ${escapeHtml(item.buyer_name)}` : 'o primeiro lance começa em 1 crédito'}</p></div>
-      <div class="lot-progress"><span style="width:${Math.max(0, Math.min(100, (seconds / 25) * 100))}%"></span></div>
+      <p class="field-hint">${turnLabel}</p>
+      <div class="lot-progress"><span style="width:${Math.max(0, Math.min(100, (seconds / 5) * 100))}%"></span></div>
     </section>
     <aside class="bid-panel"><span class="step-tag">SUA CARTEIRA</span><div class="wallet-amount">${state.me.credits.toLocaleString('pt-BR')} <small>CR</small></div><p>Seu saldo disponível</p>
-      <form id="bid-form" class="bid-form"><label for="bid-amount">Seu lance</label><div class="bid-input"><input id="bid-amount" type="number" min="${minimum}" max="${state.me.credits}" step="1" value="${minimum}" required ${!canBid ? 'disabled' : ''}><span>CR</span></div><p class="field-hint">Próximo lance: <strong>${minimum.toLocaleString('pt-BR')} CR</strong> ou mais</p><button class="button button-dark button-full" type="submit" ${!canBid ? 'disabled' : ''}>Dar lance <span>↗</span></button>${!canBid ? '<p class="field-hint">Saldo insuficiente para cobrir o próximo lance.</p>' : ''}</form>
+      <form id="bid-form" class="bid-form"><label for="bid-amount">Seu lance</label><div class="bid-input"><input id="bid-amount" type="number" min="${minimum}" max="${state.me.credits}" step="1" value="${minimum}" required ${!canBid ? 'disabled' : ''}><span>CR</span></div><p class="field-hint">Próximo lance: <strong>${minimum.toLocaleString('pt-BR')} CR</strong> ou mais</p><button class="button button-dark button-full" type="submit" ${!canBid ? 'disabled' : ''}>Dar lance <span>↗</span></button>${!isMyTurn ? '<p class="field-hint">Aguarde sua vez; cada jogador tem 5 segundos.</p>' : !canBid ? '<p class="field-hint">Saldo insuficiente para cobrir o próximo lance.</p>' : ''}</form>
       <div class="auction-players">${state.players.map((player) => `<div><span>${escapeHtml(player.name)}${player.is_me ? ' (você)' : ''}</span><strong>${player.credits.toLocaleString('pt-BR')} CR</strong></div>`).join('')}</div>
     </aside>
   </div>${state.me.isHost ? '<button id="end-auction" class="button button-outline">Encerrar leilão</button>' : ''}`;
@@ -184,6 +188,16 @@ function renderPhase(state) {
   return renderFinished(state);
 }
 
+function updateAuctionTimer() {
+  const timer = roomContent.querySelector('.timer[data-deadline]');
+  if (!timer) return;
+  const seconds = Math.max(0, Number(timer.dataset.deadline) - Math.floor(Date.now() / 1000));
+  timer.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  timer.classList.toggle('timer-urgent', seconds <= 2);
+  const progress = roomContent.querySelector('.lot-progress > span');
+  if (progress) progress.style.width = `${Math.min(100, (seconds / 5) * 100)}%`;
+}
+
 async function refresh(force = false) {
   if (!identity) return;
   try {
@@ -198,6 +212,8 @@ async function refresh(force = false) {
     showHome();
   }
 }
+
+setInterval(updateAuctionTimer, 250);
 
 document.querySelectorAll('.mode-button').forEach((button) => button.addEventListener('click', () => {
   mode = button.dataset.mode;
