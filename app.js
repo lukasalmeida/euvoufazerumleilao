@@ -10,6 +10,7 @@ let mode = 'create';
 let toastTimer;
 let pollTimer;
 let itemsSubmitting = false;
+let acknowledgedPhase = null;
 
 async function api(action, payload = {}) {
   const response = await fetch('api.php', {
@@ -136,6 +137,12 @@ function render(state) {
   document.querySelector('#room-subtitle').textContent = `${state.players.length} ${state.players.length === 1 ? 'jogador' : 'jogadores'} · ${state.room.startingCredits.toLocaleString('pt-BR')} créditos iniciais`;
   document.querySelector('#copy-code').textContent = state.room.code;
   roomContent.innerHTML = renderPhase(state);
+  if (acknowledgedPhase !== state.room.phase) {
+    acknowledgedPhase = state.room.phase;
+    api('ack_phase', { phase: state.room.phase }).catch(() => {
+      if (acknowledgedPhase === state.room.phase) acknowledgedPhase = null;
+    });
+  }
 }
 
 function renderPlayers(state) {
@@ -144,7 +151,7 @@ function renderPlayers(state) {
       <span class="player-index">${String(index + 1).padStart(2, '0')}</span>
       <span class="player-avatar">${escapeHtml(player.name.slice(0, 1).toUpperCase())}</span>
       <span class="player-name">${escapeHtml(player.name)}${player.is_me ? '<small>VOCÊ</small>' : ''}${player.is_host ? '<small>ANFITRIÃO</small>' : ''}</span>
-      <span class="player-ready">${player.item_count}/5 itens</span>
+      <span class="player-ready">${player.item_count}/5 itens${state.room.phase === 'items' ? (player.page_phase === 'items' ? ' · tela ok' : ' · sincronizando') : ''}</span>
     </div>`).join('')}</div>`;
 }
 
@@ -167,8 +174,10 @@ function renderLobby(state) {
 }
 
 function renderItems(state) {
-  const existing = state.items.filter((item) => item.owner_name === state.me.name);
+  const existing = state.items.filter((item) => item.owner_id === state.me.id);
   const submitted = existing.length === 5;
+  const missingItems = state.players.some((player) => player.item_count !== 5);
+  const missingPage = state.players.some((player) => player.page_phase !== 'items');
   return `<div class="setup-grid">
     <section class="content-section">
       <div class="section-title"><div><span class="step-tag">02 / SUA VITRINE</span><h2>Escolha cinco itens</h2></div><span class="count-pill">${submitted ? '5/5 PRONTO' : '0/5 ITENS'}</span></div>
@@ -181,8 +190,8 @@ function renderItems(state) {
       </form>
     </section>
     <aside class="content-section roster-section"><span class="step-tag">PRONTIDÃO</span><h2>Todo mundo pronto?</h2>${renderPlayers(state)}
-      ${state.me.isHost ? `<button id="start-auction" class="button button-dark button-full" ${state.players.some((player) => player.item_count !== 5) ? 'disabled' : ''}>Começar o leilão <span>→</span></button>` : '<p class="waiting-message"><span class="waiting-dot"></span> O leilão começa quando todos cadastrarem.</p>'}
-      ${state.me.isHost && state.players.some((player) => player.item_count !== 5) ? '<p class="field-hint">O botão libera quando todos tiverem 5 itens.</p>' : ''}
+      ${state.me.isHost ? `<button id="start-auction" class="button button-dark button-full" ${missingItems || missingPage ? 'disabled' : ''}>Começar o leilão <span>→</span></button>` : '<p class="waiting-message"><span class="waiting-dot"></span> O leilão começa quando todos cadastrarem.</p>'}
+      ${state.me.isHost && (missingItems || missingPage) ? `<p class="field-hint">${missingItems ? 'O botão libera quando todos tiverem 5 itens.' : 'Aguardando todos abrirem esta tela; ela atualiza automaticamente.'}</p>` : ''}
     </aside>
   </div>`;
 }
@@ -243,14 +252,14 @@ async function refresh(force = false) {
   if (!identity) return;
   try {
     const result = await api('state');
+    const phaseChanged = currentState && currentState.room.phase !== result.state.room.phase;
     const hasUnsavedItems = roomContent.querySelector('#items-form')
       && [...roomContent.querySelectorAll('[data-item-name]')].some((input) => input.value.trim() !== '');
-    if (!force && (itemsSubmitting || hasUnsavedItems)) return;
-    if (!force && roomContent.contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
+    if (!force && !phaseChanged && (itemsSubmitting || hasUnsavedItems)) return;
+    if (!force && !phaseChanged && roomContent.contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
     render(result.state);
   } catch (error) {
     notify(error.message);
-    showHome();
   }
 }
 
@@ -383,17 +392,19 @@ document.querySelector('#room-code').addEventListener('input', (event) => {
 
 const requestedRoomCode = new URLSearchParams(window.location.search).get('room')?.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
 if (requestedRoomCode) {
-  identity = null;
-  localStorage.removeItem(storageKey);
-  mode = 'join';
-  document.querySelector('[data-mode="create"]').classList.remove('is-active');
-  document.querySelector('[data-mode="create"]').setAttribute('aria-selected', 'false');
-  document.querySelector('[data-mode="join"]').classList.add('is-active');
-  document.querySelector('[data-mode="join"]').setAttribute('aria-selected', 'true');
-  document.querySelector('#create-fields').hidden = true;
-  document.querySelector('#join-fields').hidden = false;
-  document.querySelector('#entry-submit-label').textContent = 'Entrar na sala';
-  document.querySelector('#room-code').value = requestedRoomCode;
+  if (identity?.roomCode?.toUpperCase() !== requestedRoomCode || !identity?.playerId) {
+    identity = null;
+    localStorage.removeItem(storageKey);
+    mode = 'join';
+    document.querySelector('[data-mode="create"]').classList.remove('is-active');
+    document.querySelector('[data-mode="create"]').setAttribute('aria-selected', 'false');
+    document.querySelector('[data-mode="join"]').classList.add('is-active');
+    document.querySelector('[data-mode="join"]').setAttribute('aria-selected', 'true');
+    document.querySelector('#create-fields').hidden = true;
+    document.querySelector('#join-fields').hidden = false;
+    document.querySelector('#entry-submit-label').textContent = 'Entrar na sala';
+    document.querySelector('#room-code').value = requestedRoomCode;
+  }
 }
 
 if (identity?.roomCode && identity?.playerId) {

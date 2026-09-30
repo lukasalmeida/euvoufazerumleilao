@@ -14,6 +14,24 @@ class DuplicateItemsException extends DomainException
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
+function logEvent(string $event, array $context = []): void
+{
+    $directory = dirname(__DIR__) . '/.' . basename(__DIR__) . '-data';
+    if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
+        error_log('Unable to create application log directory.');
+        return;
+    }
+    $entry = [
+        'timestamp' => gmdate('c'),
+        'event' => $event,
+        'request_id' => $GLOBALS['requestId'] ?? '',
+    ] + $context;
+    $encoded = json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($encoded === false || file_put_contents($directory . '/app.log', $encoded . PHP_EOL, FILE_APPEND | LOCK_EX) === false) {
+        error_log('Unable to write application log entry.');
+    }
+}
+
 function respond(array $payload, int $status = 200): never
 {
     http_response_code($status);
@@ -49,8 +67,13 @@ function database(): PDO
     }
     $pdo->exec("CREATE TABLE IF NOT EXISTS players (
         id TEXT PRIMARY KEY, room_code TEXT NOT NULL REFERENCES rooms(code) ON DELETE CASCADE,
-        name TEXT NOT NULL, credits INTEGER NOT NULL, joined_at INTEGER NOT NULL
+        name TEXT NOT NULL, credits INTEGER NOT NULL, joined_at INTEGER NOT NULL,
+        page_phase TEXT NOT NULL DEFAULT 'lobby'
     )");
+    $playerColumns = $pdo->query('PRAGMA table_info(players)')->fetchAll();
+    if (!in_array('page_phase', array_column($playerColumns, 'name'), true)) {
+        $pdo->exec("ALTER TABLE players ADD COLUMN page_phase TEXT NOT NULL DEFAULT 'lobby'");
+    }
     $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS player_names_per_room ON players(room_code, name COLLATE NOCASE)');
     $pdo->exec("CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY AUTOINCREMENT, room_code TEXT NOT NULL REFERENCES rooms(code) ON DELETE CASCADE,
@@ -201,10 +224,10 @@ function state(PDO $pdo, array $data): array
         throw $error;
     }
 
-    $statement = $pdo->prepare('SELECT id, name, credits, joined_at FROM players WHERE room_code = ? ORDER BY joined_at, name');
+    $statement = $pdo->prepare('SELECT id, name, credits, joined_at, page_phase FROM players WHERE room_code = ? ORDER BY joined_at, name');
     $statement->execute([$room['code']]);
     $players = $statement->fetchAll();
-    $statement = $pdo->prepare("SELECT i.id, i.name, i.minimum_bid, i.position, i.status, i.current_bid, i.buyer_id, i.deadline, i.turn_player_id,
+    $statement = $pdo->prepare("SELECT i.id, i.owner_id, i.name, i.minimum_bid, i.position, i.status, i.current_bid, i.buyer_id, i.deadline, i.turn_player_id,
         owner.name AS owner_name, buyer.name AS buyer_name
         FROM items i JOIN players owner ON owner.id = i.owner_id
         LEFT JOIN players buyer ON buyer.id = i.buyer_id
@@ -213,10 +236,10 @@ function state(PDO $pdo, array $data): array
     $items = $statement->fetchAll();
     $itemCount = [];
     foreach ($items as $item) {
-        $itemCount[$item['owner_name']] = ($itemCount[$item['owner_name']] ?? 0) + 1;
+        $itemCount[$item['owner_id']] = ($itemCount[$item['owner_id']] ?? 0) + 1;
     }
     foreach ($players as &$entry) {
-        $entry['item_count'] = $itemCount[$entry['name']] ?? 0;
+        $entry['item_count'] = $itemCount[$entry['id']] ?? 0;
         $entry['is_host'] = $entry['id'] === $room['host_id'];
         $entry['is_me'] = $entry['id'] === $player['id'];
     }
@@ -240,10 +263,14 @@ function state(PDO $pdo, array $data): array
     ];
 }
 
+$GLOBALS['requestId'] = bin2hex(random_bytes(8));
+$action = '';
+$roomCode = '';
 try {
     $pdo = database();
     $data = requestData();
     $action = (string)($data['action'] ?? $_GET['action'] ?? '');
+    $roomCode = strtoupper(trim((string)($data['roomCode'] ?? '')));
 
     if ($action === 'create') {
         $name = requiredString($data, 'name', 24);
@@ -261,27 +288,46 @@ try {
         $statement->execute([$code, $credits, $playerId, time()]);
         $statement = $pdo->prepare('INSERT INTO players (id, room_code, name, credits, joined_at) VALUES (?, ?, ?, ?, ?)');
         $statement->execute([$playerId, $code, $name, $credits, time()]);
+        logEvent('room_created', ['action' => $action, 'room_code' => $code]);
         respond(['ok' => true, 'roomCode' => $code, 'playerId' => $playerId]);
     }
 
     if ($action === 'join') {
         $name = requiredString($data, 'name', 24);
         $code = strtoupper(requiredString($data, 'roomCode', 6));
-        $statement = $pdo->prepare("SELECT * FROM rooms WHERE code = ? AND phase IN ('lobby', 'items')");
-        $statement->execute([$code]);
-        $room = $statement->fetch();
-        if (!$room) {
-            throw new DomainException('Sala indisponível. Confira o código ou veja se o leilão já começou.');
-        }
         $playerId = bin2hex(random_bytes(16));
-        $statement = $pdo->prepare('INSERT INTO players (id, room_code, name, credits, joined_at) VALUES (?, ?, ?, ?, ?)');
-        $statement->execute([$playerId, $code, $name, $room['starting_credits'], time()]);
+        begin($pdo);
+        try {
+            $statement = $pdo->prepare("SELECT * FROM rooms WHERE code = ? AND phase IN ('lobby', 'items')");
+            $statement->execute([$code]);
+            $room = $statement->fetch();
+            if (!$room) {
+                throw new DomainException('Sala indisponível. Confira o código ou veja se o leilão já começou.');
+            }
+            $statement = $pdo->prepare('INSERT INTO players (id, room_code, name, credits, joined_at) VALUES (?, ?, ?, ?, ?)');
+            $statement->execute([$playerId, $code, $name, $room['starting_credits'], time()]);
+            $pdo->exec('COMMIT');
+        } catch (Throwable $error) {
+            $pdo->exec('ROLLBACK');
+            throw $error;
+        }
+        logEvent('player_joined', ['action' => $action, 'room_code' => $code]);
         respond(['ok' => true, 'roomCode' => $code, 'playerId' => $playerId]);
     }
 
     [$room, $player] = roomAndPlayer($pdo, $data);
     if ($action === 'state') {
         respond(['ok' => true, 'state' => state($pdo, $data)]);
+    }
+
+    if ($action === 'ack_phase') {
+        $phase = (string)($data['phase'] ?? '');
+        if (!in_array($phase, ['lobby', 'items', 'auction', 'finished'], true) || $phase !== $room['phase']) {
+            throw new DomainException('A tela da sala mudou. Atualize para continuar.');
+        }
+        $statement = $pdo->prepare('UPDATE players SET page_phase = ? WHERE id = ? AND room_code = ?');
+        $statement->execute([$phase, $player['id'], $room['code']]);
+        respond(['ok' => true]);
     }
 
     if ($action === 'theme') {
@@ -370,6 +416,7 @@ try {
                 $statement->execute([$room['code'], $player['id'], $name, time() + random_int(0, 100000) + $position]);
             }
             $pdo->exec('COMMIT');
+            logEvent('items_saved', ['action' => $action, 'room_code' => $room['code'], 'item_count' => count($cleanItems)]);
         } catch (Throwable $error) {
             $pdo->exec('ROLLBACK');
             throw $error;
@@ -383,11 +430,14 @@ try {
         }
         begin($pdo);
         try {
-            $statement = $pdo->prepare('SELECT p.name, COUNT(i.id) AS item_count FROM players p LEFT JOIN items i ON i.owner_id = p.id AND i.status = ? WHERE p.room_code = ? GROUP BY p.id');
+            $statement = $pdo->prepare('SELECT p.name, p.page_phase, COUNT(i.id) AS item_count FROM players p LEFT JOIN items i ON i.owner_id = p.id AND i.status = ? WHERE p.room_code = ? GROUP BY p.id');
             $statement->execute(['draft', $room['code']]);
             foreach ($statement->fetchAll() as $entry) {
                 if ((int)$entry['item_count'] !== 5) {
                     throw new DomainException("Aguardando {$entry['name']} cadastrar os cinco itens.");
+                }
+                if ($entry['page_phase'] !== 'items') {
+                    throw new DomainException("Aguardando {$entry['name']} abrir a tela do cadastro de itens.");
                 }
             }
             $statement = $pdo->prepare('SELECT id FROM items WHERE room_code = ? ORDER BY position');
@@ -410,6 +460,7 @@ try {
             $statement = $pdo->prepare("UPDATE rooms SET phase = 'auction', current_item_id = ? WHERE code = ?");
             $statement->execute([$firstItem, $room['code']]);
             $pdo->exec('COMMIT');
+            logEvent('auction_started', ['action' => $action, 'room_code' => $room['code'], 'item_count' => count($itemIds)]);
         } catch (Throwable $error) {
             $pdo->exec('ROLLBACK');
             throw $error;
@@ -534,16 +585,21 @@ try {
 
     throw new DomainException('Ação desconhecida.');
 } catch (DuplicateItemsException $error) {
+    logEvent('request_rejected', ['action' => $action, 'room_code' => $roomCode, 'status' => 400, 'error_type' => get_class($error)]);
     respond(['ok' => false, 'error' => $error->getMessage(), 'duplicateItems' => $error->names], 400);
 } catch (DomainException $error) {
+    logEvent('request_rejected', ['action' => $action, 'room_code' => $roomCode, 'status' => 400, 'error_type' => get_class($error)]);
     respond(['ok' => false, 'error' => $error->getMessage()], 400);
 } catch (PDOException $error) {
     if (str_contains($error->getMessage(), 'UNIQUE constraint failed')) {
+        logEvent('request_rejected', ['action' => $action, 'room_code' => $roomCode, 'status' => 409, 'error_type' => get_class($error)]);
         respond(['ok' => false, 'error' => 'Já existe alguém com esse nome na sala.'], 409);
     }
+    logEvent('request_failed', ['action' => $action, 'room_code' => $roomCode, 'status' => 500, 'error_type' => get_class($error), 'error' => $error->getMessage()]);
     error_log($error->getMessage());
     respond(['ok' => false, 'error' => 'Não foi possível concluir a operação. Tente novamente.'], 500);
 } catch (Throwable $error) {
+    logEvent('request_failed', ['action' => $action, 'room_code' => $roomCode, 'status' => 500, 'error_type' => get_class($error), 'error' => $error->getMessage()]);
     error_log($error->getMessage());
     respond(['ok' => false, 'error' => 'Ocorreu um erro inesperado.'], 500);
 }
