@@ -1,5 +1,28 @@
 <?php
 declare(strict_types=1);
+$isUsableIpv4 = static fn(string $address): bool =>
+  filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)
+  && !str_starts_with($address, '127.')
+  && !str_starts_with($address, '169.254.')
+  && $address !== '0.0.0.0';
+$interfaceIps = [];
+if (function_exists('net_get_interfaces')) {
+  foreach (net_get_interfaces() as $interface) {
+    if (empty($interface['up'])) continue;
+    foreach ($interface['unicast'] ?? [] as $unicast) {
+      $address = $unicast['address'] ?? '';
+      if ($isUsableIpv4($address)) $interfaceIps[] = $address;
+    }
+  }
+}
+$hostnameIp = gethostbyname(gethostname());
+$serverIp = '';
+foreach (array_unique([$_SERVER['SERVER_ADDR'] ?? '', $hostnameIp, ...$interfaceIps]) as $candidateIp) {
+  if ($isUsableIpv4($candidateIp)) {
+    $serverIp = $candidateIp;
+    break;
+  }
+}
 ?><!doctype html>
 <html lang="pt-BR">
 <head>
@@ -13,7 +36,7 @@ declare(strict_types=1);
   <link rel="stylesheet" href="style.css">
   <script src="app.js?v=<?= filemtime(__DIR__ . '/app.js') ?>" defer></script>
 </head>
-<body>
+<body data-server-ip="<?= htmlspecialchars($serverIp, ENT_QUOTES, 'UTF-8') ?>">
   <header class="topbar">
     <a class="brand" href="./" aria-label="Eu vou fazer um leilão, início">
       <span class="brand-mark" aria-hidden="true">E</span>
@@ -70,10 +93,26 @@ declare(strict_types=1);
           <h1 id="room-title">Sua sala</h1>
           <p class="room-subtitle" id="room-subtitle"></p>
         </div>
-        <div class="room-code-block"><span>CÓDIGO DA SALA</span><button id="copy-code" class="room-code" type="button" title="Copiar código"></button></div>
+        <div class="room-code-block"><span>CÓDIGO DA SALA</span><button id="copy-code" class="room-code" type="button" title="Compartilhar sala"></button></div>
       </div>
       <div id="room-content" class="room-content"></div>
     </section>
+    <dialog id="share-dialog" class="share-dialog" aria-labelledby="share-title">
+      <div class="share-dialog-header">
+        <div><span class="step-tag">CONVITE DA SALA</span><h2 id="share-title">Chame o grupo</h2></div>
+        <button id="close-share" class="icon-button" type="button" aria-label="Fechar convite" title="Fechar">×</button>
+      </div>
+      <p class="share-copy">Compartilhe o código ou envie o link para entrar na sala.</p>
+      <div class="share-code-row"><strong id="share-code"></strong><button id="copy-room-code" class="button button-outline" type="button">Copiar código</button></div>
+      <div class="share-actions">
+        <a id="share-whatsapp" class="button button-dark" target="_blank" rel="noopener noreferrer">WhatsApp <span aria-hidden="true">↗</span></a>
+        <button id="share-link" class="button button-outline" type="button">Compartilhar link <span aria-hidden="true">↗</span></button>
+      </div>
+      <div class="share-qr-block">
+        <img id="share-qr" alt="QR code para entrar nesta sala" width="176" height="176">
+        <p>Aponte a câmera para entrar</p>
+      </div>
+    </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </main>
   <footer class="site-footer"><span>EU VOU FAZER UM LEILÃO</span><span>JOGO LOCAL · FEITO PARA JOGAR JUNTO</span></footer>

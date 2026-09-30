@@ -2,6 +2,7 @@ const homeView = document.querySelector('#home-view');
 const roomView = document.querySelector('#room-view');
 const roomContent = document.querySelector('#room-content');
 const toast = document.querySelector('#toast');
+const shareDialog = document.querySelector('#share-dialog');
 const storageKey = 'leilao-de-bolso-player';
 let identity = JSON.parse(localStorage.getItem(storageKey) || 'null');
 let currentState = null;
@@ -30,6 +31,46 @@ function notify(message) {
   toast.classList.add('is-visible');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('is-visible'), 3200);
+}
+
+function roomInviteUrl() {
+  const url = new URL(window.location.href);
+  url.search = '';
+  url.hash = '';
+  const serverIp = document.body.dataset.serverIp;
+  if (serverIp) url.hostname = serverIp;
+  url.searchParams.set('room', currentState.room.code);
+  return url.toString();
+}
+
+async function copyText(value, successMessage) {
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const field = document.createElement('textarea');
+    field.value = value;
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.append(field);
+    field.select();
+    const copied = document.execCommand('copy');
+    field.remove();
+    if (!copied) {
+      notify(value);
+      return;
+    }
+  }
+  notify(successMessage);
+}
+
+function openShareDialog() {
+  const code = currentState.room.code;
+  const inviteUrl = roomInviteUrl();
+  const message = `Entre no meu leilão! Código: ${code}\n${inviteUrl}`;
+  document.querySelector('#share-code').textContent = code;
+  document.querySelector('#share-whatsapp').href = `https://wa.me/?text=${encodeURIComponent(message)}`;
+  document.querySelector('#share-qr').src = `https://api.qrserver.com/v1/create-qr-code/?size=176x176&margin=0&data=${encodeURIComponent(inviteUrl)}`;
+  shareDialog.showModal();
 }
 
 function escapeHtml(value) {
@@ -242,13 +283,22 @@ document.querySelector('#entry-form').addEventListener('submit', async (event) =
   }
 });
 
-document.querySelector('#copy-code').addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(currentState.room.code);
-    notify('Código copiado.');
-  } catch {
-    notify(`Código da sala: ${currentState.room.code}`);
+document.querySelector('#copy-code').addEventListener('click', openShareDialog);
+document.querySelector('#close-share').addEventListener('click', () => shareDialog.close());
+document.querySelector('#copy-room-code').addEventListener('click', () => {
+  copyText(currentState.room.code, 'Código copiado.');
+});
+document.querySelector('#share-link').addEventListener('click', async () => {
+  const inviteUrl = roomInviteUrl();
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'Convite para o leilão', text: `Código da sala: ${currentState.room.code}`, url: inviteUrl });
+    } catch (error) {
+      if (error.name !== 'AbortError') notify('Não foi possível compartilhar o link.');
+    }
+    return;
   }
+  await copyText(inviteUrl, 'Link copiado.');
 });
 
 roomContent.addEventListener('submit', async (event) => {
@@ -330,6 +380,21 @@ roomContent.addEventListener('click', async (event) => {
 document.querySelector('#room-code').addEventListener('input', (event) => {
   event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
 });
+
+const requestedRoomCode = new URLSearchParams(window.location.search).get('room')?.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+if (requestedRoomCode) {
+  identity = null;
+  localStorage.removeItem(storageKey);
+  mode = 'join';
+  document.querySelector('[data-mode="create"]').classList.remove('is-active');
+  document.querySelector('[data-mode="create"]').setAttribute('aria-selected', 'false');
+  document.querySelector('[data-mode="join"]').classList.add('is-active');
+  document.querySelector('[data-mode="join"]').setAttribute('aria-selected', 'true');
+  document.querySelector('#create-fields').hidden = true;
+  document.querySelector('#join-fields').hidden = false;
+  document.querySelector('#entry-submit-label').textContent = 'Entrar na sala';
+  document.querySelector('#room-code').value = requestedRoomCode;
+}
 
 if (identity?.roomCode && identity?.playerId) {
   refresh();
