@@ -104,7 +104,7 @@ function textLength(string $value): int
     return function_exists('mb_strlen') ? mb_strlen($value) : strlen($value);
 }
 
-function normalizeItemName(string $value): string
+function normalizeItemName(string $value): string       
 {
     return function_exists('mb_strtolower') ? mb_strtolower(trim($value), 'UTF-8') : strtolower(trim($value));
 }

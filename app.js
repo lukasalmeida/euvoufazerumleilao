@@ -136,7 +136,7 @@ function render(state) {
   document.querySelector('#room-title').textContent = state.room.theme || 'Sala de leilão';
   document.querySelector('#room-subtitle').textContent = `${state.players.length} ${state.players.length === 1 ? 'jogador' : 'jogadores'} · ${state.room.startingCredits.toLocaleString('pt-BR')} créditos iniciais`;
   document.querySelector('#copy-code').textContent = state.room.code;
-  roomContent.innerHTML = renderPhase(state);
+  roomContent.innerHTML = `<div class="room-actions"><button id="leave-room" class="button button-outline" type="button">Encerrar sessão e voltar ao início <span aria-hidden="true">↗</span></button></div>${renderPhase(state)}`;
   if (acknowledgedPhase !== state.room.phase) {
     acknowledgedPhase = state.room.phase;
     api('ack_phase', { phase: state.room.phase }).catch(() => {
@@ -227,7 +227,6 @@ function renderFinished(state) {
     <div class="results-grid"><div class="content-section"><span class="step-tag">PLACAR FINAL</span><div class="ranking-list">${ranking.map((player, index) => `<div class="ranking-row"><span class="rank-number">${String(index + 1).padStart(2, '0')}</span><span class="rank-name">${escapeHtml(player.name)}${player.is_me ? ' · VOCÊ' : ''}</span><strong>${player.credits.toLocaleString('pt-BR')} <small>CR</small></strong></div>`).join('')}</div></div>
       <div class="content-section"><span class="step-tag">ITENS ARREMATADOS</span><div class="inventory-list">${state.items.filter((item) => item.status === 'sold').map((item) => `<div class="inventory-row"><span>${escapeHtml(item.name)}<small>${escapeHtml(item.buyer_name)} levou de ${escapeHtml(item.owner_name)}</small></span><strong>${Number(item.current_bid).toLocaleString('pt-BR')} CR</strong></div>`).join('') || '<p class="field-hint">Nenhum item foi vendido nesta rodada.</p>'}</div></div></div>
     ${state.me.isHost ? '<button id="restart-session" class="button button-dark">Reiniciar sessão <span>↻</span></button>' : ''}
-    <button id="leave-room" class="button button-outline">Voltar ao início</button>
   </section>`;
 }
 

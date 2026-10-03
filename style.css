@@ -73,6 +73,7 @@ input::placeholder { color: #a7a69e; }
 .room-code-block > span { color: var(--muted); }
 .room-code { padding: 0; border: 0; color: var(--green); background: transparent; font-family: var(--mono); font-size: 22px; font-weight: 500; letter-spacing: 0; cursor: pointer; }
 .room-content { padding-top: 28px; }
+.room-actions { display: flex; justify-content: flex-end; margin-bottom: 18px; }
 .lobby-grid, .setup-grid { display: grid; grid-template-columns: 1fr .85fr; align-items: start; gap: 22px; }
 .content-section { padding: clamp(20px, 3vw, 30px); }
 .section-title { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
